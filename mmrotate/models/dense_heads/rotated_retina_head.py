@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch.nn as nn
-from mmcv.cnn import ConvModule, bias_init_with_prob, normal_init
+from mmcv.cnn import ConvModule
 from mmcv.runner import force_fp32
 
 from ..builder import ROTATED_HEADS
@@ -15,17 +15,18 @@ class RotatedRetinaHead(RotatedAnchorHead):
     The head contains two subnetworks. The first classifies anchor boxes and
     the second regresses deltas for the anchors.
 
-    Example:
-        >>> import torch
-        >>> self = RetinaHead(11, 7)
-        >>> x = torch.rand(1, 7, 32, 32)
-        >>> cls_score, bbox_pred = self.forward_single(x)
-        >>> # Each anchor predicts a score for each class except background
-        >>> cls_per_anchor = cls_score.shape[1] / self.num_anchors
-        >>> box_per_anchor = bbox_pred.shape[1] / self.num_anchors
-        >>> assert cls_per_anchor == (self.num_classes)
-        >>> assert box_per_anchor == 4
-    """
+    Args:
+        num_classes (int): Number of categories excluding the background
+            category.
+        in_channels (int): Number of channels in the input feature map.
+        stacked_convs (int, optional): Number of stacked convolutions.
+        conv_cfg (dict, optional): Config dict for convolution layer.
+            Default: None.
+        norm_cfg (dict, optional): Config dict for normalization layer.
+            Default: None.
+        anchor_generator (dict): Config dict for anchor generator
+        init_cfg (dict or list[dict], optional): Initialization config dict.
+    """  # noqa: W605
 
     def __init__(self,
                  num_classes,
@@ -39,7 +40,17 @@ class RotatedRetinaHead(RotatedAnchorHead):
                      scales_per_octave=3,
                      ratios=[0.5, 1.0, 2.0],
                      strides=[8, 16, 32, 64, 128]),
+                 init_cfg=dict(
+                     type='Normal',
+                     layer='Conv2d',
+                     std=0.01,
+                     override=dict(
+                         type='Normal',
+                         name='retina_cls',
+                         std=0.01,
+                         bias_prob=0.01)),
                  **kwargs):
+
         self.stacked_convs = stacked_convs
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
@@ -47,6 +58,7 @@ class RotatedRetinaHead(RotatedAnchorHead):
             num_classes,
             in_channels,
             anchor_generator=anchor_generator,
+            init_cfg=init_cfg,
             **kwargs)
 
     def _init_layers(self):
@@ -82,16 +94,6 @@ class RotatedRetinaHead(RotatedAnchorHead):
         self.retina_reg = nn.Conv2d(
             self.feat_channels, self.num_anchors * 5, 3, padding=1)
 
-    def init_weights(self):
-        """Initialize weights of the head."""
-        for m in self.cls_convs:
-            normal_init(m.conv, std=0.01)
-        for m in self.reg_convs:
-            normal_init(m.conv, std=0.01)
-        bias_cls = bias_init_with_prob(0.01)
-        normal_init(self.retina_cls, std=0.01, bias=bias_cls)
-        normal_init(self.retina_reg, std=0.01)
-
     def forward_single(self, x):
         """Forward feature of a single scale level.
 
@@ -99,11 +101,12 @@ class RotatedRetinaHead(RotatedAnchorHead):
             x (torch.Tensor): Features of a single scale level.
 
         Returns:
-            tuple:
-                cls_score (torch.Tensor): Cls scores for a single scale level
-                    the channels number is num_anchors * num_classes.
-                bbox_pred (torch.Tensor): Box energies / deltas for a single
-                    scale level, the channels number is num_anchors * 4.
+            tuple (torch.Tensor):
+
+                - cls_score (torch.Tensor): Cls scores for a single scale \
+                    level the channels number is num_anchors * num_classes.
+                - bbox_pred (torch.Tensor): Box energies / deltas for a \
+                    single scale level, the channels number is num_anchors * 5.
         """
         cls_feat = x
         reg_feat = x
@@ -129,7 +132,7 @@ class RotatedRetinaHead(RotatedAnchorHead):
                 level with shape (N, num_anchors * 5, H, W)
 
         Returns:
-            list[list[Tensor]]: best or refined rbboxes of each level
+            list[list[Tensor]]: best or refined rbboxes of each level \
                 of each image.
         """
         num_levels = len(cls_scores)

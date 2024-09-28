@@ -15,6 +15,7 @@ class RBboxOverlaps2D(object):
                  is_aligned=False,
                  version='oc'):
         """Calculate IoU between 2D bboxes.
+
         Args:
             bboxes1 (torch.Tensor): bboxes have shape (m, 5) in
                 <cx, cy, w, h, a> format, or shape (m, 6) in
@@ -35,6 +36,7 @@ class RBboxOverlaps2D(object):
         """
         assert bboxes1.size(-1) in [0, 5, 6]
         assert bboxes2.size(-1) in [0, 5, 6]
+
         if bboxes2.size(-1) == 6:
             bboxes2 = bboxes2[..., :5]
         if bboxes1.size(-1) == 6:
@@ -61,6 +63,7 @@ def rbbox_overlaps(bboxes1, bboxes2, mode='iou', is_aligned=False):
             Default "iou".
         is_aligned (bool, optional): If True, then m and n must be equal.
             Default False.
+
     Returns:
         Tensor: shape (m, n) if ``is_aligned`` is False else shape (m,)
     """
@@ -77,4 +80,10 @@ def rbbox_overlaps(bboxes1, bboxes2, mode='iou', is_aligned=False):
     if rows * cols == 0:
         return bboxes1.new(rows, 1) if is_aligned else bboxes1.new(rows, cols)
 
-    return box_iou_rotated(bboxes1, bboxes2, mode, is_aligned)
+    # resolve `rbbox_overlaps` abnormal when input rbbox is too small.
+    clamped_bboxes1 = bboxes1.detach().clone()
+    clamped_bboxes2 = bboxes2.detach().clone()
+    clamped_bboxes1[:, 2:4].clamp_(min=1e-3)
+    clamped_bboxes2[:, 2:4].clamp_(min=1e-3)
+
+    return box_iou_rotated(clamped_bboxes1, clamped_bboxes2, mode, is_aligned)

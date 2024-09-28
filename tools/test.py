@@ -9,7 +9,6 @@ import mmcv
 import torch
 from mmcv import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
-from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
                          wrap_fp16_model)
 from mmdet.apis import multi_gpu_test, single_gpu_test
@@ -17,6 +16,8 @@ from mmdet.datasets import build_dataloader, replace_ImageToTensor
 
 from mmrotate.datasets import build_dataset
 from mmrotate.models import build_detector
+from mmrotate.utils import (build_ddp, build_dp, compat_cfg, get_device,
+                            setup_multi_processes)
 
 
 def parse_args():
@@ -115,6 +116,18 @@ def main():
     cfg = Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+
+    cfg = compat_cfg(cfg)
+
+    if args.format_only and cfg.mp_start_method != 'spawn':
+        warnings.warn(
+            '`mp_start_method` in `cfg` is set to `spawn` to use CUDA '
+            'with multiprocessing when formatting output result.')
+        cfg.mp_start_method = 'spawn'
+
+    # set multi-process settings
+    setup_multi_processes(cfg)
+
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
         torch.backends.cudnn.benchmark = True
@@ -129,24 +142,6 @@ def main():
         elif cfg.model.neck.get('rfp_backbone'):
             if cfg.model.neck.rfp_backbone.get('pretrained'):
                 cfg.model.neck.rfp_backbone.pretrained = None
-
-    # in case the test dataset is concatenated
-    samples_per_gpu = 1
-    if isinstance(cfg.data.test, dict):
-        cfg.data.test.test_mode = True
-        samples_per_gpu = cfg.data.test.pop('samples_per_gpu', 1)
-        if samples_per_gpu > 1:
-            # Replace 'ImageToTensor' to 'DefaultFormatBundle'
-            cfg.data.test.pipeline = replace_ImageToTensor(
-                cfg.data.test.pipeline)
-    elif isinstance(cfg.data.test, list):
-        for ds_cfg in cfg.data.test:
-            ds_cfg.test_mode = True
-        samples_per_gpu = max(
-            [ds_cfg.pop('samples_per_gpu', 1) for ds_cfg in cfg.data.test])
-        if samples_per_gpu > 1:
-            for ds_cfg in cfg.data.test:
-                ds_cfg.pipeline = replace_ImageToTensor(ds_cfg.pipeline)
 
     if args.gpu_ids is not None:
         cfg.gpu_ids = args.gpu_ids
@@ -166,6 +161,41 @@ def main():
         distributed = True
         init_dist(args.launcher, **cfg.dist_params)
 
+    test_dataloader_default_args = dict(
+        samples_per_gpu=1, workers_per_gpu=2, dist=distributed, shuffle=False)
+
+    # in case the test dataset is concatenated
+    if isinstance(cfg.data.test, dict):
+        cfg.data.test.test_mode = True
+        if 'samples_per_gpu' in cfg.data.test:
+            warnings.warn('`samples_per_gpu` in `test` field of '
+                          'data will be deprecated, you should'
+                          ' move it to `test_dataloader` field')
+            test_dataloader_default_args['samples_per_gpu'] = \
+                cfg.data.test.pop('samples_per_gpu')
+        if test_dataloader_default_args['samples_per_gpu'] > 1:
+            # Replace 'ImageToTensor' to 'DefaultFormatBundle'
+            cfg.data.test.pipeline = replace_ImageToTensor(
+                cfg.data.test.pipeline)
+    elif isinstance(cfg.data.test, list):
+        for ds_cfg in cfg.data.test:
+            ds_cfg.test_mode = True
+            if 'samples_per_gpu' in ds_cfg:
+                warnings.warn('`samples_per_gpu` in `test` field of '
+                              'data will be deprecated, you should'
+                              ' move it to `test_dataloader` field')
+        samples_per_gpu = max(
+            [ds_cfg.pop('samples_per_gpu', 1) for ds_cfg in cfg.data.test])
+        test_dataloader_default_args['samples_per_gpu'] = samples_per_gpu
+        if samples_per_gpu > 1:
+            for ds_cfg in cfg.data.test:
+                ds_cfg.pipeline = replace_ImageToTensor(ds_cfg.pipeline)
+
+    test_loader_cfg = {
+        **test_dataloader_default_args,
+        **cfg.data.get('test_dataloader', {})
+    }
+
     rank, _ = get_dist_info()
     # allows not to create
     if args.work_dir is not None and rank == 0:
@@ -175,18 +205,16 @@ def main():
 
     # build the dataloader
     dataset = build_dataset(cfg.data.test)
-    data_loader = build_dataloader(
-        dataset,
-        samples_per_gpu=samples_per_gpu,
-        workers_per_gpu=cfg.data.workers_per_gpu,
-        dist=distributed,
-        shuffle=False)
+    data_loader = build_dataloader(dataset, **test_loader_cfg)
 
     # build the model and load checkpoint
     cfg.model.train_cfg = None
+    cfg.device = get_device()
     model = build_detector(cfg.model, test_cfg=cfg.get('test_cfg'))
+
+    # fp16 setting
     fp16_cfg = cfg.get('fp16', None)
-    if fp16_cfg is not None:
+    if fp16_cfg is not None or cfg.device == 'npu':
         wrap_fp16_model(model)
     checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
     if args.fuse_conv_bn:
@@ -199,14 +227,19 @@ def main():
         model.CLASSES = dataset.CLASSES
 
     if not distributed:
-        model = MMDataParallel(model, device_ids=cfg.gpu_ids)
+        model = build_dp(model, cfg.device, device_ids=cfg.gpu_ids)
         outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
                                   args.show_score_thr)
     else:
-        model = MMDistributedDataParallel(
-            model.cuda(),
-            device_ids=[torch.cuda.current_device()],
-            broadcast_buffers=False)
+        find_unused_parameters = cfg.get('find_unused_parameters', False)
+        # Sets the `find_unused_parameters` parameter in
+        # torch.nn.parallel.DistributedDataParallel
+        model = build_ddp(
+            model,
+            cfg.device,
+            device_ids=[int(os.environ['LOCAL_RANK'])],
+            broadcast_buffers=False,
+            find_unused_parameters=find_unused_parameters)
         outputs = multi_gpu_test(model, data_loader, args.tmpdir,
                                  args.gpu_collect)
 

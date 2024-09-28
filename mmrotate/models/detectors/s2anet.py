@@ -7,7 +7,10 @@ from .utils import AlignConvModule
 
 @ROTATED_DETECTORS.register_module()
 class S2ANet(RotatedBaseDetector):
-    """Rotated Refinement RetinaNet."""
+    """Implementation of `Align Deep Features for Oriented Object Detection.`__
+
+    __ https://ieeexplore.ieee.org/document/9377550
+    """
 
     def __init__(self,
                  backbone,
@@ -28,7 +31,6 @@ class S2ANet(RotatedBaseDetector):
             fam_head.update(train_cfg=train_cfg['fam_cfg'])
         fam_head.update(test_cfg=test_cfg)
         self.fam_head = build_head(fam_head)
-        self.fam_head.init_weights()
 
         self.align_conv_type = align_cfgs['type']
         self.align_conv_size = align_cfgs['kernel_size']
@@ -44,7 +46,6 @@ class S2ANet(RotatedBaseDetector):
             odm_head.update(train_cfg=train_cfg['odm_cfg'])
         odm_head.update(test_cfg=test_cfg)
         self.odm_head = build_head(odm_head)
-        self.odm_head.init_weights()
 
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
@@ -110,8 +111,8 @@ class S2ANet(RotatedBaseDetector):
                 Defaults to False.
 
         Returns:
-            list[list[np.ndarray]]: BBox results of each image and classes.
-                The outer list corresponds to each image. The inner list
+            list[list[np.ndarray]]: BBox results of each image and classes. \
+                The outer list corresponds to each image. The inner list \
                 corresponds to each class.
         """
         x = self.extract_feat(img)

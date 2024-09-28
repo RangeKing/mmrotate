@@ -5,7 +5,7 @@ from .single_stage import RotatedSingleStageDetector
 
 @ROTATED_DETECTORS.register_module()
 class RotatedRepPoints(RotatedSingleStageDetector):
-    """Implementation of RepPoints."""
+    """Implementation of Rotated RepPoints."""
 
     def __init__(self,
                  backbone,
@@ -16,4 +16,3 @@ class RotatedRepPoints(RotatedSingleStageDetector):
                  pretrained=None):
         super(RotatedRepPoints, self).__init__(backbone, neck, bbox_head,
                                                train_cfg, test_cfg, pretrained)
-        self.bbox_head.init_weights()

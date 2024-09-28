@@ -1,6 +1,6 @@
 # Copyright (c) SJTU. All rights reserved.
 import torch.nn as nn
-from mmcv.cnn import ConvModule, bias_init_with_prob, normal_init
+from mmcv.cnn import ConvModule
 from mmcv.runner import force_fp32
 
 from ..builder import ROTATED_HEADS
@@ -10,7 +10,11 @@ from .kfiou_rotate_retina_head import KFIoURRetinaHead
 
 @ROTATED_HEADS.register_module()
 class KFIoUODMRefineHead(KFIoURRetinaHead):
-    """Rotational Anchor-based refine head.
+    """Rotated Anchor-based refine head for KFIoU. It's a part of the Oriented
+    Detection Module (ODM), which produces orientation-sensitive features for
+    classification and orientation-invariant features for localization. The
+    difference from `ODMRefineHead` is that its loss_bbox requires bbox_pred,
+    bbox_targets, pred_decode and targets_decode as inputs.
 
     Args:
         num_classes (int): Number of categories excluding the background
@@ -28,6 +32,7 @@ class KFIoUODMRefineHead(KFIoURRetinaHead):
         loss_bbox (dict): Config of localization loss.
         train_cfg (dict): Training config of anchor head.
         test_cfg (dict): Testing config of anchor head.
+        init_cfg (dict or list[dict], optional): Initialization config dict.
     """  # noqa: W605
 
     def __init__(self,
@@ -39,6 +44,15 @@ class KFIoUODMRefineHead(KFIoURRetinaHead):
                  anchor_generator=dict(
                      type='PseudoAnchorGenerator',
                      strides=[8, 16, 32, 64, 128]),
+                 init_cfg=dict(
+                     type='Normal',
+                     layer='Conv2d',
+                     std=0.01,
+                     override=dict(
+                         type='Normal',
+                         name='odm_cls',
+                         std=0.01,
+                         bias_prob=0.01)),
                  **kwargs):
         self.bboxes_as_anchors = None
         self.stacked_convs = stacked_convs
@@ -49,6 +63,7 @@ class KFIoUODMRefineHead(KFIoURRetinaHead):
             in_channels,
             stacked_convs=2,
             anchor_generator=anchor_generator,
+            init_cfg=init_cfg,
             **kwargs)
 
     def _init_layers(self):
@@ -91,18 +106,6 @@ class KFIoUODMRefineHead(KFIoURRetinaHead):
         self.odm_reg = nn.Conv2d(
             self.feat_channels, self.num_anchors * 5, 3, padding=1)
 
-    def init_weights(self):
-        """Initialize weights of the head."""
-
-        normal_init(self.or_conv, std=0.01)
-        for m in self.cls_convs:
-            normal_init(m.conv, std=0.01)
-        for m in self.reg_convs:
-            normal_init(m.conv, std=0.01)
-        bias_cls = bias_init_with_prob(0.01)
-        normal_init(self.odm_cls, std=0.01, bias=bias_cls)
-        normal_init(self.odm_reg, std=0.01)
-
     def forward_single(self, x):
         """Forward feature of a single scale level.
 
@@ -110,11 +113,12 @@ class KFIoUODMRefineHead(KFIoURRetinaHead):
             x (torch.Tensor): Features of a single scale level.
 
         Returns:
-            tuple:
-                cls_score (torch.Tensor): Cls scores for a single scale level
-                    the channels number is num_anchors * num_classes.
-                bbox_pred (torch.Tensor): Box energies / deltas for a single
-                    scale level, the channels number is num_anchors * 4.
+            tuple (torch.Tensor):
+
+                - cls_score (torch.Tensor): Cls scores for a single scale \
+                    level the channels number is num_anchors * num_classes.
+                - bbox_pred (torch.Tensor): Box energies / deltas for a \
+                    single scale level, the channels number is num_anchors * 4.
         """
         or_feat = self.or_conv(x)
         reg_feat = or_feat
@@ -139,8 +143,9 @@ class KFIoUODMRefineHead(KFIoURRetinaHead):
 
         Returns:
             tuple:
-                anchor_list (list[Tensor]): Anchors of each image
-                valid_flag_list (list[Tensor]): Valid flags of each image
+
+                - anchor_list (list[Tensor]): Anchors of each image
+                - valid_flag_list (list[Tensor]): Valid flags of each image
         """
         anchor_list = [[
             bboxes_img_lvl.clone().detach() for bboxes_img_lvl in bboxes_img
@@ -184,7 +189,7 @@ class KFIoUODMRefineHead(KFIoURRetinaHead):
                    cfg=None,
                    rescale=False,
                    rois=None):
-        """Transform network output for a batch into labeled boxes.s.
+        """Transform network output for a batch into labeled boxes.
 
         Args:
             cls_scores (list[Tensor]): Box scores for each scale level
@@ -193,10 +198,9 @@ class KFIoUODMRefineHead(KFIoURRetinaHead):
                 level with shape (N, num_anchors * 5, H, W)
             img_metas (list[dict]): size / scale info for each image
             cfg (mmcv.Config): test / postprocessing configuration
-            rois (list[list[Tensor]]): input rbboxes of each level of each
-             image.
-                rois output by former stages and are to be refined
             rescale (bool): if True, return boxes in original image space
+            rois (list[list[Tensor]]): input rbboxes of each level of each
+                image. rois output by former stages and are to be refined.
 
         Returns:
             list[tuple[Tensor, Tensor]]: each item in result_list is 2-tuple.

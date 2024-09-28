@@ -3,7 +3,6 @@ from inspect import signature
 
 import torch
 import torch.nn as nn
-from mmcv.cnn import normal_init
 from mmcv.runner import force_fp32
 from mmdet.core import images_to_levels, multi_apply, unmap
 from mmdet.models.dense_heads.base_dense_head import BaseDenseHead
@@ -18,7 +17,7 @@ from ..builder import ROTATED_HEADS, build_loss
 
 @ROTATED_HEADS.register_module()
 class RotatedAnchorHead(BaseDenseHead):
-    """Anchor-based head (RotatedRPN, RotatedRetinaNet, etc.).
+    """Rotated Anchor-based head (RotatedRPN, RotatedRetinaNet, etc.).
 
     Args:
         num_classes (int): Number of categories excluding the background
@@ -29,10 +28,15 @@ class RotatedAnchorHead(BaseDenseHead):
         bbox_coder (dict): Config of bounding box coder.
         reg_decoded_bbox (bool): If true, the regression loss would be
             applied on decoded bounding boxes. Default: False
+        assign_by_circumhbbox (str): If None, assigner will assign according to
+            the IoU between anchor and GT (OBB), called RetinaNet-OBB.
+            If angle definition method, assigner will assign according to the
+            IoU between anchor and GT's circumbox (HBB), called RetinaNet-HBB.
         loss_cls (dict): Config of classification loss.
         loss_bbox (dict): Config of localization loss.
         train_cfg (dict): Training config of anchor head.
         test_cfg (dict): Testing config of anchor head.
+        init_cfg (dict or list[dict], optional): Initialization config dict.
     """  # noqa: W605
 
     def __init__(self,
@@ -59,8 +63,9 @@ class RotatedAnchorHead(BaseDenseHead):
                      loss_weight=1.0),
                  loss_bbox=dict(type='L1Loss', loss_weight=1.0),
                  train_cfg=None,
-                 test_cfg=None):
-        super(RotatedAnchorHead, self).__init__()
+                 test_cfg=None,
+                 init_cfg=dict(type='Normal', layer='Conv2d', std=0.01)):
+        super(RotatedAnchorHead, self).__init__(init_cfg)
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.feat_channels = feat_channels
@@ -105,11 +110,6 @@ class RotatedAnchorHead(BaseDenseHead):
                                   self.num_anchors * self.cls_out_channels, 1)
         self.conv_reg = nn.Conv2d(self.in_channels, self.num_anchors * 5, 1)
 
-    def init_weights(self):
-        """Initialize weights of the head."""
-        normal_init(self.conv_cls, std=0.01)
-        normal_init(self.conv_reg, std=0.01)
-
     def forward_single(self, x):
         """Forward feature of a single scale level.
 
@@ -117,11 +117,12 @@ class RotatedAnchorHead(BaseDenseHead):
             x (torch.Tensor): Features of a single scale level.
 
         Returns:
-            tuple:
-                cls_score (torch.Tensor): Cls scores for a single scale level
-                    the channels number is num_anchors * num_classes.
-                bbox_pred (torch.Tensor): Box energies / deltas for a single
-                    scale level, the channels number is num_anchors * 5.
+            tuple (torch.Tensor):
+
+                - cls_score (torch.Tensor): Cls scores for a single scale \
+                    level the channels number is num_anchors * num_classes.
+                - bbox_pred (torch.Tensor): Box energies / deltas for a \
+                    single scale level, the channels number is num_anchors * 5.
         """
         cls_score = self.conv_cls(x)
         bbox_pred = self.conv_reg(x)
@@ -137,11 +138,11 @@ class RotatedAnchorHead(BaseDenseHead):
         Returns:
             tuple: A tuple of classification scores and bbox prediction.
 
-                - cls_scores (list[Tensor]): Classification scores for all
-                    scale levels, each is a 4D-tensor, the channels number
+                - cls_scores (list[Tensor]): Classification scores for all \
+                    scale levels, each is a 4D-tensor, the channels number \
                     is num_anchors * num_classes.
-                - bbox_preds (list[Tensor]): Box energies / deltas for all
-                    scale levels, each is a 4D-tensor, the channels number
+                - bbox_preds (list[Tensor]): Box energies / deltas for all \
+                    scale levels, each is a 4D-tensor, the channels number \
                     is num_anchors * 5.
         """
         return multi_apply(self.forward_single, feats)
@@ -155,16 +156,17 @@ class RotatedAnchorHead(BaseDenseHead):
             device (torch.device | str): Device for returned tensors
 
         Returns:
-            tuple:
-                anchor_list (list[Tensor]): Anchors of each image.
-                valid_flag_list (list[Tensor]): Valid flags of each image.
+            tuple (list[Tensor]):
+
+                - anchor_list (list[Tensor]): Anchors of each image.
+                - valid_flag_list (list[Tensor]): Valid flags of each image.
         """
         num_imgs = len(img_metas)
 
         # since feature map sizes of all images are the same, we only compute
         # anchors for one time
         multi_level_anchors = self.anchor_generator.grid_priors(
-            featmap_sizes, device)
+            featmap_sizes, device=device)
         anchor_list = [multi_level_anchors for _ in range(num_imgs)]
 
         # for each image, we compute valid flags of multi level anchors
@@ -191,7 +193,7 @@ class RotatedAnchorHead(BaseDenseHead):
         Args:
             flat_anchors (torch.Tensor): Multi-level anchors of the image,
                 which are concatenated into a single tensor of shape
-                (num_anchors ,4)
+                (num_anchors, 5)
             valid_flags (torch.Tensor): Multi level valid flags of the image,
                 which are concatenated into a single tensor of
                     shape (num_anchors,).
@@ -208,13 +210,15 @@ class RotatedAnchorHead(BaseDenseHead):
                 set of anchors.
 
         Returns:
-            tuple:
-                labels_list (list[Tensor]): Labels of each level
-                label_weights_list (list[Tensor]): Label weights of each level
-                bbox_targets_list (list[Tensor]): BBox targets of each level
-                bbox_weights_list (list[Tensor]): BBox weights of each level
-                num_total_pos (int): Number of positive samples in all images
-                num_total_neg (int): Number of negative samples in all images
+            tuple (list[Tensor]):
+
+                - labels_list (list[Tensor]): Labels of each level
+                - label_weights_list (list[Tensor]): Label weights of each \
+                  level
+                - bbox_targets_list (list[Tensor]): BBox targets of each level
+                - bbox_weights_list (list[Tensor]): BBox weights of each level
+                - num_total_pos (int): Number of positive samples in all images
+                - num_total_neg (int): Number of negative samples in all images
         """
         inside_flags = rotated_anchor_inside_flags(
             flat_anchors, valid_flags, img_meta['img_shape'][:2],
@@ -300,7 +304,7 @@ class RotatedAnchorHead(BaseDenseHead):
             anchor_list (list[list[Tensor]]): Multi level anchors of each
                 image. The outer list indicates images, and the inner list
                 corresponds to feature levels of the image. Each element of
-                the inner list is a tensor of shape (num_anchors, 4).
+                the inner list is a tensor of shape (num_anchors, 5).
             valid_flag_list (list[list[Tensor]]): Multi level valid flags of
                 each image. The outer list indicates images, and the inner list
                 corresponds to feature levels of the image. Each element of
@@ -326,6 +330,7 @@ class RotatedAnchorHead(BaseDenseHead):
                     images.
                 - num_total_neg (int): Number of negative samples in all \
                     images.
+
             additional_returns: This function enables user-defined returns from
                 `self._get_targets_single`. These returns are currently refined
                 to properties at each feature map (i.e. having HxW dimension).
@@ -409,7 +414,10 @@ class RotatedAnchorHead(BaseDenseHead):
                 positive anchors.
 
         Returns:
-            dict[str, Tensor]: A dictionary of loss components.
+            tuple (torch.Tensor):
+
+                - loss_cls (torch.Tensor): cls. loss for each scale level.
+                - loss_bbox (torch.Tensor): reg. loss for each scale level.
         """
         # classification loss
         labels = labels.reshape(-1)

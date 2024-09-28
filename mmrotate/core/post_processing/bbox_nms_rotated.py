@@ -18,7 +18,7 @@ def multiclass_nms_rotated(multi_bboxes,
             contains scores of the background class, but this will be ignored.
         score_thr (float): bbox threshold, bboxes with scores lower than it
             will not be considered.
-        nms (float): NMS
+        nms (float): Config of NMS.
         max_num (int, optional): if there are more than max_num bboxes after
             NMS, only top max_num will be kept. Default to -1.
         score_factors (Tensor, optional): The factors multiplied to scores
@@ -27,7 +27,7 @@ def multiclass_nms_rotated(multi_bboxes,
             bboxes. Default to False.
 
     Returns:
-        tuple: (dets, labels, indices (optional)), tensors of shape (k, 5),
+        tuple (dets, labels, indices (optional)): tensors of shape (k, 5), \
         (k), and (k). Dets are boxes with scores. Labels are 0-based.
     """
     num_classes = multi_scores.size(1) - 1
@@ -39,7 +39,7 @@ def multiclass_nms_rotated(multi_bboxes,
             multi_scores.size(0), num_classes, 5)
     scores = multi_scores[:, :-1]
 
-    labels = torch.arange(num_classes, dtype=torch.long)
+    labels = torch.arange(num_classes, dtype=torch.long, device=scores.device)
     labels = labels.view(1, -1).expand_as(scores)
     bboxes = bboxes.reshape(-1, 5)
     scores = scores.reshape(-1)
@@ -64,7 +64,13 @@ def multiclass_nms_rotated(multi_bboxes,
         else:
             return dets, labels
 
-    max_coordinate = bboxes.max()
+    # Strictly, the maximum coordinates of the rotating box (x,y,w,h,a)
+    # should be calculated by polygon coordinates.
+    # But the conversion from rbbox to polygon will slow down the speed.
+    # So we use max(x,y) + max(w,h) as max coordinate
+    # which is larger than polygon max coordinate
+    # max(x1, y1, x2, y2,x3, y3, x4, y4)
+    max_coordinate = bboxes[:, :2].max() + bboxes[:, 2:4].max()
     offsets = labels.to(bboxes) * (max_coordinate + 1)
     if bboxes.size(-1) == 5:
         bboxes_for_nms = bboxes.clone()
@@ -88,6 +94,23 @@ def multiclass_nms_rotated(multi_bboxes,
 
 def aug_multiclass_nms_rotated(merged_bboxes, merged_labels, score_thr, nms,
                                max_num, classes):
+    """NMS for aug multi-class bboxes.
+
+    Args:
+        multi_bboxes (torch.Tensor): shape (n, #class*5) or (n, 5)
+        multi_scores (torch.Tensor): shape (n, #class), where the last column
+            contains scores of the background class, but this will be ignored.
+        score_thr (float): bbox threshold, bboxes with scores lower than it
+            will not be considered.
+        nms (float): Config of NMS.
+        max_num (int, optional): if there are more than max_num bboxes after
+            NMS, only top max_num will be kept. Default to -1.
+        classes (int): number of classes.
+
+    Returns:
+        tuple (dets, labels): tensors of shape (k, 5), and (k). Dets are boxes
+            with scores. Labels are 0-based.
+    """
     bboxes, labels = [], []
 
     for cls in range(classes):
